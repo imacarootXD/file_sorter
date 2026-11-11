@@ -1,5 +1,6 @@
 from pathlib import Path
 from collections import defaultdict
+import hashlib
 import re
 import shutil
 import tkinter as tk
@@ -7,8 +8,9 @@ from tkinter import filedialog, messagebox, ttk
 
 
 def movefiles(directory, file_name, new_directory):
-    #moves a files from one folder to another
-    old_file = Path(directory) / file_name
+    # Accept both a path relative to directory and an absolute file path.
+    selected_file = Path(file_name)
+    old_file = selected_file if selected_file.is_absolute() else Path(directory) / selected_file
     destination = Path(new_directory)
 
     if not old_file.is_file():
@@ -16,8 +18,15 @@ def movefiles(directory, file_name, new_directory):
     if not destination.is_dir():
         return False, f"Invalid destination directory: {destination}"
 
+    target_file = destination / old_file.name
     try:
-        shutil.move(str(old_file), str(destination / old_file.name))
+        if old_file.resolve() == target_file.resolve():
+            return False, "The source and destination are the same file."
+    except OSError as error:
+        return False, f"Error resolving file paths: {error}"
+
+    try:
+        shutil.move(str(old_file), str(target_file))
     except OSError as error:
         return False, f"Error moving file: {error}"
     return True, f"Moved {old_file.name} successfully."
@@ -105,6 +114,53 @@ def deleteFilesByPattern(directory, confirm):
                 deleted += 1
             except OSError:
                 continue
+    return deleted
+
+
+def file_hash(file, chunk_size=1024 * 1024):
+    #returns an SHA256 hash of the file input
+    digest = hashlib.sha256()
+    with file.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def deleteFilesByHash(directory, confirm):
+    #deletes content duplicates
+    files_by_size = defaultdict(list)
+    for file in basicListFiles(directory):
+        try:
+            files_by_size[file.stat().st_size].append(file)
+        except OSError:
+            continue
+
+    files_by_hash = defaultdict(list)
+    for files in files_by_size.values():
+        if len(files) < 2:
+            continue
+        for file in files:
+            try:
+                files_by_hash[file_hash(file)].append(file)
+            except OSError:
+                continue
+
+    deleted = 0
+    for content_hash, files in sorted(files_by_hash.items()):
+        if len(files) < 2:
+            continue
+        original = files[0]
+        for duplicate in files[1:]:
+            if confirm(
+                "Delete identical file?",
+                f"These files have identical content (SHA-256: {content_hash[:16]}...).\n\n"
+                f"Keep:\n{original}\n\nDelete:\n{duplicate}",
+            ):
+                try:
+                    duplicate.unlink()
+                    deleted += 1
+                except OSError:
+                    continue
     return deleted
 
 
@@ -267,7 +323,6 @@ class FileSorterApp:
             )
             if not file_name:
                 return
-            file_name = Path(file_name).name
         destination = self.destination.get().strip()
         if not destination:
             destination = filedialog.askdirectory(title="Choose a destination directory")
@@ -295,12 +350,14 @@ class FileSorterApp:
             return
         deleted_by_name = deleteFilesByName(directory, messagebox.askyesno)
         deleted_by_pattern = deleteFilesByPattern(directory, messagebox.askyesno)
-        deleted = deleted_by_name + deleted_by_pattern
+        deleted_by_hash = deleteFilesByHash(directory, messagebox.askyesno)
+        deleted = deleted_by_name + deleted_by_pattern + deleted_by_hash
         self.clear_output()
         self.write_output(
             f"Deleted {deleted} file(s): "
             f"{deleted_by_name} duplicate name(s), "
-            f"{deleted_by_pattern} copy pattern(s)."
+            f"{deleted_by_pattern} copy pattern(s), "
+            f"{deleted_by_hash} identical-content duplicate(s)."
         )
         self.status.set(f"Deleted {deleted} file(s).")
 
